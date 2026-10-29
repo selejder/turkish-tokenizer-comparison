@@ -11,36 +11,6 @@ num_transformer = 8
 
 
 #*****************************************************
-#---------------batch operations----------------------
-#*****************************************************
-def split_text(text, merges):
-    train_split = int(len(text) * 0.8)
-    test_split= int(len(text) * 0.9)
-
-    train_data = (text[:train_split], merges)
-    test_data = (text[train_split:test_split], merges)
-    val_data = (text[:test_split], merges)
-
-    return train_data, test_data, val_data
-
-def batcher(encoded_ids, block_size: int = 256, batch_size: int = 32):
-    X = []
-    targets = []
-
-    for i in range(batch_size):
-        ix = torch.randint(0, len(encoded_ids) - (block_size + 1), (1, ))
-
-        X.append(encoded_ids[ix:ix+block_size])
-        targets.append(encoded_ids[ix+1:ix+block_size+1])
-
-    X = torch.tensor(X)
-    targets = torch.tensor(targets)
-
-    return X, targets
-
-
-
-#*****************************************************
 #---------------EmbeddingOperation-------------------
 #*****************************************************
 class EmbeddingOperation(nn.Module):
@@ -210,6 +180,7 @@ class GPT(nn.Module):
                                         ])
         self.final_layer = nn.Linear(in_features=embed_dim, out_features=vocab_size)
 
+        self.block_size = block_size
     def forward(self, x,  target = None):
         x = self.embedding_layer(x)
         for transformer in self.transformers:
