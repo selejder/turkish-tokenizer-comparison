@@ -1,32 +1,43 @@
+"""Small GPT model shared by both tokenizer experiments."""
+
 import torch
 import torch.nn as nn
 
-vocab_size = 211
-block_size = 256
-embed_dim = 256
-num_head = 16
-head_size = 16
-batch_size = 32
-num_transformer = 8
+from parameters import (
+    BATCH_SIZE,
+    BLOCK_SIZE,
+    EMBED_DIM,
+    HEAD_SIZE,
+    NUM_HEADS,
+    NUM_TRANSFORMER_BLOCKS,
+)
+
+# Aliases keep the original notebook imports and default arguments working.
+block_size = BLOCK_SIZE
+embed_dim = EMBED_DIM
+num_head = NUM_HEADS
+head_size = HEAD_SIZE
+batch_size = BATCH_SIZE
+num_transformer = NUM_TRANSFORMER_BLOCKS
 
 
 #*****************************************************
 #---------------EmbeddingOperation-------------------
 #*****************************************************
 class EmbeddingOperation(nn.Module):
-    def __init__(self, vocab_size: int = 211, block_size: int = 256, embed_dim: int = 256):
+    def __init__(self, vocab_size: int = 211, block_size: int = block_size, embed_dim: int = embed_dim):
         super().__init__()
 
         self.token_embedding = nn.Embedding(vocab_size, embed_dim)
         self.position_embedding = nn.Embedding(block_size, embed_dim)
 
     def forward(self, ix):
-        B, T = ix.shape
-        self.tokens = self.token_embedding(ix)
-        self.positions_ids = torch.arange(0, T, device = ix.device)
-        self.positions = self.position_embedding(self.positions_ids)
+        _, T = ix.shape
+        tokens = self.token_embedding(ix)
+        position_ids = torch.arange(T, device=ix.device)
+        positions = self.position_embedding(position_ids)
 
-        output = self.tokens + self.positions
+        output = tokens + positions
 
         return output
 
@@ -47,7 +58,7 @@ class SingleHeadAttention(nn.Module):
         self.register_buffer('mask', mask)
 
     def forward(self, x):
-        B, T, C = x.shape
+        _, T, _ = x.shape
 
         Q = self.q_proj(x) # Q -> [batch_size, block_size, head_size]
         K = self.k_proj(x) # K -> [batch_size, block_size, head_size]
@@ -55,11 +66,10 @@ class SingleHeadAttention(nn.Module):
         K_t = K.transpose(-2, -1) # K_t -> [batch_size, head_size, block_size]
         wei = Q @ K_t # wei -> [batch_size, block_size, block_size]
 
-        scale = self.head_size**0.5 
-        scaled_score = wei / scale #scaled_score -> [batch_size, block_size, block_size]
+        scaled_score = wei * (self.head_size ** -0.5)
 
-        casual_mask = self.mask[:T, :T] # type: ignore
-        forbidden = casual_mask == 0
+        causal_mask = self.mask[:T, :T]  # type: ignore
+        forbidden = causal_mask == 0
         masked_score = scaled_score.masked_fill(
             forbidden,
             float("-inf")
@@ -78,6 +88,8 @@ class SingleHeadAttention(nn.Module):
 class MultiHeadAttention(nn.Module):
     def __init__(self, block_size: int = block_size, embed_dim: int = embed_dim, head_size: int = head_size, num_head: int = num_head,):
         super().__init__()
+        if num_head * head_size != embed_dim:
+            raise ValueError("num_head * head_size must equal embed_dim")
         self.heads = nn.ModuleList([
             SingleHeadAttention(
                 block_size=block_size,
@@ -110,13 +122,13 @@ class FeedForwardNetwork(nn.Module):
         self.layers = nn.Sequential(
             nn.Linear(in_features=embed_dim, out_features=4*embed_dim),
             nn.ReLU(),
+            # Preserve the extra hidden projection from the original project.
             nn.Linear(in_features=embed_dim*4, out_features=embed_dim*4),
             nn.ReLU(),
             nn.Linear(in_features=embed_dim*4, out_features=embed_dim)
         )
 
     def forward(self, x):
-
         output = self.layers(x)
 
         return output
@@ -140,7 +152,6 @@ class MyTransformer(nn.Module):
         self.ffn = FeedForwardNetwork(embed_dim=embed_dim)
 
     def forward(self, x):
-        B, T, C = x.shape
         x = self.MHA(self.ln1(x)) + x
         x = self.ffn(self.ln2(x)) + x
 
@@ -157,12 +168,14 @@ class GPT(nn.Module):
                  block_size: int = block_size,
                  batch_size: int = batch_size,
                  num_head: int = num_head,
-                 vocab_size: int = vocab_size,
+                 vocab_size: int = 211,
                  embed_dim: int = embed_dim,
                  head_size: int = head_size,
                  num_transformer: int = num_transformer
                 ):
         super().__init__()
+        if num_head * head_size != embed_dim:
+            raise ValueError("num_head * head_size must equal embed_dim")
 
         self.embedding_layer = EmbeddingOperation(
             vocab_size=vocab_size,
@@ -181,7 +194,16 @@ class GPT(nn.Module):
         self.final_layer = nn.Linear(in_features=embed_dim, out_features=vocab_size)
 
         self.block_size = block_size
+        self.batch_size = batch_size
+
     def forward(self, x,  target = None):
+        if x.ndim != 2:
+            raise ValueError("GPT input must have shape [batch, time]")
+        if x.shape[1] > self.block_size:
+            raise ValueError(
+                f"sequence length {x.shape[1]} exceeds block_size {self.block_size}"
+            )
+
         x = self.embedding_layer(x)
         for transformer in self.transformers:
             x = transformer(x)
